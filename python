@@ -1218,6 +1218,8 @@ import pandas as pd
 import shutil
 import tempfile
 
+import docling  # INTEGRASI DOCLING
+
 from utils_gdrive import load_meta as load_meta_external  # To avoid name clash
 
 router = APIRouter()
@@ -1282,9 +1284,28 @@ def download_file(service, file_id, download_path):
 
 def convert_anything_to_parquet_snappy(source_path, dest_path):
     ext = Path(source_path).suffix.lower()
+    # --- PATCH: docling auto-detect universal scan ---
     try:
+        # First try docling universal parse
+        try:
+            doc = docling.Doc.from_file(source_path)
+            # Try extracting a table if exists, else fallback to normal docling text extraction
+            if hasattr(doc, "to_df"):
+                df = doc.to_df()
+            elif hasattr(doc, "tables") and doc.tables:
+                df = doc.tables[0].to_df()
+            else:
+                # fallback: try extract text paragraphs as a DataFrame
+                df = pd.DataFrame({"text": doc.text.splitlines()})
+            df.to_parquet(dest_path, index=False, compression="snappy", engine="pyarrow")
+            print(f"[CONVERT][DOCLING] Converted {source_path} → {dest_path} via docling")
+            return True
+        except Exception as e:
+            print(f"[CONVERT][DOCLING][WARN] Failed docling parse {source_path}: {e}")
+        # --- END PATCH ---
+
+        # Manual conversion (as before)
         if ext == ".parquet":
-            # Read and re-save to guarantee snappy
             df = pd.read_parquet(source_path, engine="pyarrow")
             df.to_parquet(dest_path, index=False, compression="snappy", engine="pyarrow")
         elif ext in [".csv", ".tsv"]:
@@ -1301,9 +1322,11 @@ def convert_anything_to_parquet_snappy(source_path, dest_path):
             df = pd.read_feather(source_path)
             df.to_parquet(dest_path, index=False, compression="snappy", engine="pyarrow")
         else:
-            # fallback: try duckdb
+            # fallback: try duckdb for unknown tabular file
             try:
-                duckdb.sql(f"COPY (SELECT * FROM read_csv_auto('{source_path}')) TO '{dest_path}' (FORMAT PARQUET, COMPRESSION 'SNAPPY');")
+                duckdb.sql(
+                    f"COPY (SELECT * FROM read_csv_auto('{source_path}')) TO '{dest_path}' (FORMAT PARQUET, COMPRESSION 'SNAPPY');"
+                )
             except Exception as e:
                 print(f"[CONVERT][FALLBACK][DUCKDB] {e}")
                 return False
@@ -1407,7 +1430,6 @@ async def trigger_download_missing_files_endpoint(request: Request):
 if __name__ == "__main__":
     result = download_missing_files()
     print(result)
-
 4. batch_agentic.py:
 
 import os
